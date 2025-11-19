@@ -1,7 +1,7 @@
 {
   "name": "shopkey-fs-backend",
-  "version": "1.0.0",
-  "description": "SHOP KEY backend using Node.js + Express + JSON file storage (no DB server, no sqlite)",
+  "version": "2.0.0",
+  "description": "SHOP KEY backend using Node.js + Express + JSON file storage (users, deposits, keys)",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"

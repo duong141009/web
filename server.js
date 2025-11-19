@@ -1,3 +1,4 @@
+// SHOP KEY backend - file storage v2 (users, deposits, keys)
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -11,38 +12,16 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// ====== Simple JSON file storage ======
+// ====== Simple JSON file DB ======
 const DATA_FILE = process.env.DATA_FILE || 'data.json';
 const dataPath = path.join(__dirname, DATA_FILE);
 
 let db = {
-  users: [],
-  deposits: [],
-  keys: [],
-  seq: {
-    user: 1,
-    deposit: 1,
-    key: 1
-  }
+  users: [],     // {id, username, password_hash, email, balance, is_admin, created_at}
+  deposits: [],  // {id, user_id, amount, note, status, created_at}
+  keys: [],      // {id, user_id, code, pack_type, created_at}
+  seq: { user: 1, deposit: 1, key: 1 }
 };
-
-function loadData() {
-  if (!fs.existsSync(dataPath)) {
-    console.log('No data.json, will create with default admin.');
-    saveData();
-    ensureAdmin();
-    return;
-  }
-  try {
-    const raw = fs.readFileSync(dataPath, 'utf8');
-    db = JSON.parse(raw);
-    ensureAdmin();
-  } catch (e) {
-    console.error('Error reading data.json, using empty DB:', e);
-    db = { users: [], deposits: [], keys: [], seq: { user: 1, deposit: 1, key: 1 } };
-    ensureAdmin();
-  }
-}
 
 function saveData() {
   try {
@@ -52,10 +31,9 @@ function saveData() {
   }
 }
 
-// Create default admin if not exist
 async function ensureAdmin() {
-  const exists = db.users.find(u => u.username === 'admin');
-  if (!exists) {
+  const adminExists = db.users.find(u => u.username === 'admin');
+  if (!adminExists) {
     const hash = await bcrypt.hash('admin123', 10);
     const user = {
       id: db.seq.user++,
@@ -69,6 +47,29 @@ async function ensureAdmin() {
     db.users.push(user);
     saveData();
     console.log('Created default admin: admin / admin123');
+  }
+}
+
+function loadData() {
+  if (!fs.existsSync(dataPath)) {
+    console.log('No existing data.json, creating new one.');
+    saveData();
+    ensureAdmin();
+    return;
+  }
+  try {
+    const raw = fs.readFileSync(dataPath, 'utf8');
+    db = JSON.parse(raw);
+    // ensure seq fields exist
+    if (!db.seq) db.seq = { user: 1, deposit: 1, key: 1 };
+    db.seq.user = db.seq.user || 1;
+    db.seq.deposit = db.seq.deposit || 1;
+    db.seq.key = db.seq.key || 1;
+    ensureAdmin();
+  } catch (e) {
+    console.error('Error reading data.json, resetting DB:', e);
+    db = { users: [], deposits: [], keys: [], seq: { user: 1, deposit: 1, key: 1 } };
+    ensureAdmin();
   }
 }
 
@@ -102,24 +103,21 @@ function adminRequired(req, res, next) {
   next();
 }
 
-// ====== ROUTES ======
+// ====== BASIC ROUTES ======
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', message: 'SHOP KEY API (Node + JSON file)' });
+  res.json({ status: 'ok', message: 'SHOP KEY API (file storage v2)' });
 });
 
 // Đăng ký
 app.post('/api/register', async (req, res) => {
   const { username, password, email } = req.body;
-  if (!username || !password) {
-    return sendError(res, 'Thiếu username hoặc password');
-  }
+  if (!username || !password) return sendError(res, 'Thiếu username hoặc password');
   if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     return sendError(res, 'Email không hợp lệ');
   }
   if (password.length < 6) {
     return sendError(res, 'Mật khẩu phải từ 6 ký tự');
   }
-
   if (db.users.find(u => u.username === username)) {
     return sendError(res, 'Tên tài khoản đã tồn tại');
   }
@@ -142,28 +140,18 @@ app.post('/api/register', async (req, res) => {
 // Đăng nhập
 app.post('/api/login', async (req, res) => {
   const { username, password } = req.body;
-  if (!username || !password) {
-    return sendError(res, 'Thiếu username hoặc password');
-  }
-  const user = db.users.find(u => u.username === username);
-  if (!user) {
-    return sendError(res, 'Sai tài khoản hoặc mật khẩu', 401);
-  }
-  const ok = await bcrypt.compare(password, user.password_hash);
-  if (!ok) {
-    return sendError(res, 'Sai tài khoản hoặc mật khẩu', 401);
-  }
+  if (!username || !password) return sendError(res, 'Thiếu username hoặc password');
 
-  const payload = {
-    id: user.id,
-    username: user.username,
-    is_admin: !!user.is_admin
-  };
-  const token = jwt.sign(
-    payload,
-    process.env.JWT_SECRET || 'secret',
-    { expiresIn: process.env.JWT_EXPIRES || '7d' }
-  );
+  const user = db.users.find(u => u.username === username);
+  if (!user) return sendError(res, 'Sai tài khoản hoặc mật khẩu', 401);
+
+  const ok = await bcrypt.compare(password, user.password_hash);
+  if (!ok) return sendError(res, 'Sai tài khoản hoặc mật khẩu', 401);
+
+  const payload = { id: user.id, username: user.username, is_admin: !!user.is_admin };
+  const token = jwt.sign(payload, process.env.JWT_SECRET || 'secret', {
+    expiresIn: process.env.JWT_EXPIRES || '7d',
+  });
 
   res.json({
     success: true,
@@ -172,47 +160,44 @@ app.post('/api/login', async (req, res) => {
       id: user.id,
       username: user.username,
       balance: user.balance || 0,
-      is_admin: !!user.is_admin
-    }
+      is_admin: !!user.is_admin,
+    },
   });
 });
 
-// Thông tin user
+// Info user hiện tại
 app.get('/api/me', authRequired, (req, res) => {
   const user = db.users.find(u => u.id === req.user.id);
-  if (!user) {
-    return sendError(res, 'Không tìm thấy user', 404);
-  }
+  if (!user) return sendError(res, 'Không tìm thấy user', 404);
+
   res.json({
     id: user.id,
     username: user.username,
     email: user.email,
     balance: user.balance || 0,
-    is_admin: !!user.is_admin
+    is_admin: !!user.is_admin,
   });
 });
 
-// Tạo yêu cầu nạp
+// ====== NẠP TIỀN (USER) ======
 app.post('/api/create-deposit', authRequired, (req, res) => {
   const amount = parseInt(req.body.amount, 10);
   const note = (req.body.note || '').toString().trim();
-  if (!amount || amount <= 0) {
-    return sendError(res, 'Số tiền không hợp lệ');
-  }
+  if (!amount || amount <= 0) return sendError(res, 'Số tiền không hợp lệ');
+
   const dep = {
     id: db.seq.deposit++,
     user_id: req.user.id,
     amount,
     note,
     status: 'pending',
-    created_at: new Date().toISOString()
+    created_at: new Date().toISOString(),
   };
   db.deposits.push(dep);
   saveData();
   res.json({ success: true, message: 'Đã tạo yêu cầu nạp (pending)' });
 });
 
-// Lịch sử nạp của user
 app.get('/api/my-deposits', authRequired, (req, res) => {
   const items = db.deposits
     .filter(d => d.user_id === req.user.id)
@@ -220,7 +205,7 @@ app.get('/api/my-deposits', authRequired, (req, res) => {
   res.json({ items });
 });
 
-// Admin: list all deposits
+// ====== ADMIN: DEPOSITS ======
 app.get('/api/admin/deposits', authRequired, adminRequired, (req, res) => {
   const items = db.deposits
     .slice()
@@ -234,13 +219,12 @@ app.get('/api/admin/deposits', authRequired, adminRequired, (req, res) => {
         amount: d.amount,
         note: d.note,
         status: d.status,
-        created_at: d.created_at
+        created_at: d.created_at,
       };
     });
   res.json({ items });
 });
 
-// Admin: approve
 app.post('/api/admin/deposits/:id/approve', authRequired, adminRequired, (req, res) => {
   const id = parseInt(req.params.id, 10);
   const dep = db.deposits.find(d => d.id === id);
@@ -256,7 +240,6 @@ app.post('/api/admin/deposits/:id/approve', authRequired, adminRequired, (req, r
   res.json({ success: true, message: 'Đã duyệt và cộng tiền' });
 });
 
-// Admin: reject
 app.post('/api/admin/deposits/:id/reject', authRequired, adminRequired, (req, res) => {
   const id = parseInt(req.params.id, 10);
   const dep = db.deposits.find(d => d.id === id);
@@ -268,7 +251,89 @@ app.post('/api/admin/deposits/:id/reject', authRequired, adminRequired, (req, re
   res.json({ success: true, message: 'Đã từ chối đơn nạp' });
 });
 
+// ====== ADMIN: USERS & KEYS ======
+
+// Danh sách users (cho admin), có thể lọc phía client
+app.get('/api/admin/users', authRequired, adminRequired, (req, res) => {
+  // Chuẩn bị tổng nạp đã duyệt
+  const approvedByUser = {};
+  db.deposits.forEach(d => {
+    if (d.status === 'approved') {
+      approvedByUser[d.user_id] = (approvedByUser[d.user_id] || 0) + (d.amount || 0);
+    }
+  });
+
+  const items = db.users.map(u => ({
+    id: u.id,
+    username: u.username,
+    email: u.email,
+    balance: u.balance || 0,
+    is_admin: !!u.is_admin,
+    created_at: u.created_at,
+    total_deposit_approved: approvedByUser[u.id] || 0,
+  }));
+
+  res.json({ items });
+});
+
+// Thông tin chi tiết 1 user (kèm deposits + keys)
+app.get('/api/admin/users/:id', authRequired, adminRequired, (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  const user = db.users.find(u => u.id === id);
+  if (!user) return sendError(res, 'Không tìm thấy user', 404);
+
+  const userDeposits = db.deposits
+    .filter(d => d.user_id === id)
+    .sort((a, b) => b.id - a.id);
+
+  const userKeys = db.keys
+    .filter(k => k.user_id === id)
+    .sort((a, b) => b.id - a.id);
+
+  res.json({
+    user: {
+      id: user.id,
+      username: user.username,
+      email: user.email,
+      balance: user.balance || 0,
+      is_admin: !!user.is_admin,
+      created_at: user.created_at,
+    },
+    deposits: userDeposits,
+    keys: userKeys,
+  });
+});
+
+// Xoá 1 key
+app.post('/api/admin/keys/:id/delete', authRequired, adminRequired, (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  const idx = db.keys.findIndex(k => k.id === id);
+  if (idx === -1) return sendError(res, 'Không tìm thấy key', 404);
+  db.keys.splice(idx, 1);
+  saveData();
+  res.json({ success: true, message: 'Đã xoá key' });
+});
+
+// Xoá 1 tài khoản (và toàn bộ nạp, key liên quan)
+app.post('/api/admin/users/:id/delete', authRequired, adminRequired, (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  const idx = db.users.findIndex(u => u.id === id);
+  if (idx === -1) return sendError(res, 'Không tìm thấy user', 404);
+
+  if (db.users[idx].is_admin) {
+    return sendError(res, 'Không được xoá tài khoản admin', 403);
+  }
+
+  db.users.splice(idx, 1);
+  db.deposits = db.deposits.filter(d => d.user_id !== id);
+  db.keys = db.keys.filter(k => k.user_id !== id);
+
+  saveData();
+  res.json({ success: true, message: 'Đã xoá tài khoản và toàn bộ dữ liệu liên quan' });
+});
+
+// ====== START SERVER ======
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log('SHOP KEY file-backend đang chạy trên port', PORT);
+  console.log('SHOP KEY file-backend v2 đang chạy trên port', PORT);
 });
