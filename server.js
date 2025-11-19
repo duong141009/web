@@ -321,6 +321,77 @@ app.get('/api/my-keys', authRequired, (req, res) => {
   res.json({ items });
 });
 
+// ===== KÍCH HOẠT KEY THEO THIẾT BỊ (KHÔNG CẦN CHỦ SỞ HỮU) =====
+app.post('/api/activate-key', (req, res) => {
+  const { key_code, device_id } = req.body;
+  
+  if (!key_code || !device_id) {
+    return sendError(res, 'Thiếu key hoặc device_id');
+  }
+
+  const key = db.keys.find(k => k.code === key_code);
+  if (!key) {
+    return sendError(res, 'Key không tồn tại');
+  }
+
+  // Kiểm tra key đã hết hạn chưa
+  if (key.expires_at && new Date(key.expires_at) < new Date()) {
+    return sendError(res, 'Key đã hết hạn');
+  }
+
+  // Kiểm tra key đã được kích hoạt trên thiết bị khác chưa
+  if (key.device_id && key.device_id !== device_id) {
+    return sendError(res, 'Key đã được kích hoạt trên thiết bị khác');
+  }
+
+  // Kích hoạt key cho thiết bị
+  key.device_id = device_id;
+  saveData();
+
+  res.json({
+    success: true,
+    message: 'Kích hoạt key thành công',
+    key: {
+      code: key.code,
+      pack_type: key.pack_type,
+      expires_at: key.expires_at,
+      device_id: key.device_id
+    }
+  });
+});
+
+// ===== KIỂM TRA TRẠNG THÁI KEY CỦA THIẾT BỊ =====
+app.post('/api/check-device-key', (req, res) => {
+  const { device_id } = req.body;
+  
+  if (!device_id) {
+    return sendError(res, 'Thiếu device_id');
+  }
+
+  const now = new Date();
+  
+  // Tìm key đang active cho thiết bị này
+  const activeKey = db.keys.find(k => 
+    k.device_id === device_id && 
+    (!k.expires_at || new Date(k.expires_at) > now)
+  );
+
+  if (!activeKey) {
+    return res.json({ has_active_key: false });
+  }
+
+  res.json({
+    has_active_key: true,
+    key: {
+      code: activeKey.code,
+      pack_type: activeKey.pack_type,
+      expires_at: activeKey.expires_at,
+      device_id: activeKey.device_id,
+      is_expired: activeKey.expires_at ? new Date(activeKey.expires_at) < now : false
+    }
+  });
+});
+
 // ===== ADMIN: DEPOSITS =====
 app.get('/api/admin/deposits', authRequired, adminRequired, (req, res) => {
   const items = db.deposits
