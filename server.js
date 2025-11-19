@@ -1,4 +1,4 @@
-// SHOP KEY backend - file storage v2 (users, deposits, keys)
+// SHOP KEY backend v3 - file JSON (users, deposits, keys)
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -12,14 +12,14 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// ====== Simple JSON file DB ======
+// ===== JSON file storage =====
 const DATA_FILE = process.env.DATA_FILE || 'data.json';
 const dataPath = path.join(__dirname, DATA_FILE);
 
 let db = {
-  users: [],     // {id, username, password_hash, email, balance, is_admin, created_at}
+  users: [],     // {id, username, password_hash, email, balance, is_admin, created_at, last_login_at, last_active_at}
   deposits: [],  // {id, user_id, amount, note, status, created_at}
-  keys: [],      // {id, user_id, code, pack_type, created_at}
+  keys: [],      // {id, user_id, code, pack_type, duration_days, created_at, expires_at}
   seq: { user: 1, deposit: 1, key: 1 }
 };
 
@@ -42,7 +42,9 @@ async function ensureAdmin() {
       email: 'admin@example.com',
       balance: 0,
       is_admin: 1,
-      created_at: new Date().toISOString()
+      created_at: new Date().toISOString(),
+      last_login_at: null,
+      last_active_at: null
     };
     db.users.push(user);
     saveData();
@@ -60,11 +62,19 @@ function loadData() {
   try {
     const raw = fs.readFileSync(dataPath, 'utf8');
     db = JSON.parse(raw);
-    // ensure seq fields exist
     if (!db.seq) db.seq = { user: 1, deposit: 1, key: 1 };
     db.seq.user = db.seq.user || 1;
     db.seq.deposit = db.seq.deposit || 1;
     db.seq.key = db.seq.key || 1;
+
+    // ensure fields
+    db.users.forEach(u => {
+      if (typeof u.balance !== 'number') u.balance = Number(u.balance || 0);
+      if (typeof u.is_admin === 'undefined') u.is_admin = 0;
+      if (!u.created_at) u.created_at = new Date().toISOString();
+      if (!('last_login_at' in u)) u.last_login_at = null;
+      if (!('last_active_at' in u)) u.last_active_at = null;
+    });
     ensureAdmin();
   } catch (e) {
     console.error('Error reading data.json, resetting DB:', e);
@@ -75,7 +85,7 @@ function loadData() {
 
 loadData();
 
-// ====== Helpers ======
+// ===== Helpers =====
 function sendError(res, msg, status) {
   res.status(status || 400).json({ error: msg });
 }
@@ -103,9 +113,9 @@ function adminRequired(req, res, next) {
   next();
 }
 
-// ====== BASIC ROUTES ======
+// ===== BASIC ROUTES =====
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', message: 'SHOP KEY API (file storage v2)' });
+  res.json({ status: 'ok', message: 'SHOP KEY API v3 (file storage)' });
 });
 
 // Đăng ký
@@ -130,7 +140,9 @@ app.post('/api/register', async (req, res) => {
     email,
     balance: 0,
     is_admin: 0,
-    created_at: new Date().toISOString()
+    created_at: new Date().toISOString(),
+    last_login_at: null,
+    last_active_at: null
   };
   db.users.push(user);
   saveData();
@@ -147,6 +159,10 @@ app.post('/api/login', async (req, res) => {
 
   const ok = await bcrypt.compare(password, user.password_hash);
   if (!ok) return sendError(res, 'Sai tài khoản hoặc mật khẩu', 401);
+
+  user.last_login_at = new Date().toISOString();
+  user.last_active_at = user.last_login_at;
+  saveData();
 
   const payload = { id: user.id, username: user.username, is_admin: !!user.is_admin };
   const token = jwt.sign(payload, process.env.JWT_SECRET || 'secret', {
@@ -170,16 +186,22 @@ app.get('/api/me', authRequired, (req, res) => {
   const user = db.users.find(u => u.id === req.user.id);
   if (!user) return sendError(res, 'Không tìm thấy user', 404);
 
+  user.last_active_at = new Date().toISOString();
+  saveData();
+
   res.json({
     id: user.id,
     username: user.username,
     email: user.email,
     balance: user.balance || 0,
     is_admin: !!user.is_admin,
+    created_at: user.created_at,
+    last_login_at: user.last_login_at,
+    last_active_at: user.last_active_at
   });
 });
 
-// ====== NẠP TIỀN (USER) ======
+// ===== NẠP TIỀN (USER) =====
 app.post('/api/create-deposit', authRequired, (req, res) => {
   const amount = parseInt(req.body.amount, 10);
   const note = (req.body.note || '').toString().trim();
@@ -205,7 +227,7 @@ app.get('/api/my-deposits', authRequired, (req, res) => {
   res.json({ items });
 });
 
-// ====== ADMIN: DEPOSITS ======
+// ===== ADMIN: DEPOSITS =====
 app.get('/api/admin/deposits', authRequired, adminRequired, (req, res) => {
   const items = db.deposits
     .slice()
@@ -251,16 +273,20 @@ app.post('/api/admin/deposits/:id/reject', authRequired, adminRequired, (req, re
   res.json({ success: true, message: 'Đã từ chối đơn nạp' });
 });
 
-// ====== ADMIN: USERS & KEYS ======
+// ===== ADMIN: USERS & KEYS =====
 
-// Danh sách users (cho admin), có thể lọc phía client
+// Danh sách users (tổng tiền đã nạp + số key)
 app.get('/api/admin/users', authRequired, adminRequired, (req, res) => {
-  // Chuẩn bị tổng nạp đã duyệt
   const approvedByUser = {};
   db.deposits.forEach(d => {
     if (d.status === 'approved') {
       approvedByUser[d.user_id] = (approvedByUser[d.user_id] || 0) + (d.amount || 0);
     }
+  });
+
+  const keyCountByUser = {};
+  db.keys.forEach(k => {
+    keyCountByUser[k.user_id] = (keyCountByUser[k.user_id] || 0) + 1;
   });
 
   const items = db.users.map(u => ({
@@ -270,7 +296,10 @@ app.get('/api/admin/users', authRequired, adminRequired, (req, res) => {
     balance: u.balance || 0,
     is_admin: !!u.is_admin,
     created_at: u.created_at,
+    last_login_at: u.last_login_at,
+    last_active_at: u.last_active_at,
     total_deposit_approved: approvedByUser[u.id] || 0,
+    key_count: keyCountByUser[u.id] || 0,
   }));
 
   res.json({ items });
@@ -298,6 +327,8 @@ app.get('/api/admin/users/:id', authRequired, adminRequired, (req, res) => {
       balance: user.balance || 0,
       is_admin: !!user.is_admin,
       created_at: user.created_at,
+      last_login_at: user.last_login_at,
+      last_active_at: user.last_active_at,
     },
     deposits: userDeposits,
     keys: userKeys,
@@ -332,8 +363,8 @@ app.post('/api/admin/users/:id/delete', authRequired, adminRequired, (req, res) 
   res.json({ success: true, message: 'Đã xoá tài khoản và toàn bộ dữ liệu liên quan' });
 });
 
-// ====== START SERVER ======
+// ===== START SERVER =====
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log('SHOP KEY file-backend v2 đang chạy trên port', PORT);
+  console.log('SHOP KEY file-backend v3 đang chạy trên port', PORT);
 });
