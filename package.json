@@ -1,7 +1,7 @@
 {
-  "name": "shopkey-sqlite-backend",
+  "name": "shopkey-fs-backend",
   "version": "1.0.0",
-  "description": "SHOP KEY backend using Node.js + Express + SQLite (no external DB needed)",
+  "description": "SHOP KEY backend using Node.js + Express + JSON file storage (no DB server, no sqlite)",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -11,7 +11,6 @@
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
-    "jsonwebtoken": "^9.0.2",
-    "sqlite3": "^5.1.7"
+    "jsonwebtoken": "^9.0.2"
   }
 }

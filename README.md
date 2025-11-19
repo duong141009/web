@@ -1,56 +1,49 @@
-# SHOP KEY Backend (Node.js + Express + SQLite)
+# SHOP KEY Backend (Node.js + Express + JSON file storage)
 
-Không cần MySQL, PlanetScale, Railway. Mọi dữ liệu lưu trong file `database.sqlite`.
+Không cần MySQL, không cần SQLite. Dữ liệu lưu trong file `data.json` trong cùng thư mục.
 
-## File trong project
+## File
 
-- `server.js` – code backend (Express + SQLite)
-- `package.json` – dependency
-- `.env.example` – mẫu cấu hình
-- (database sẽ nằm trong `database.sqlite` – tự tạo nếu chưa có)
+- `server.js`
+- `package.json`
+- `.env.example`
+- `data.json` sẽ được tạo tự động (lần đầu chạy)
 
-Admin mặc định tạo sẵn khi server chạy lần đầu:
+Admin mặc định:
 
 - username: `admin`
 - password: `admin123`
 
 ## API
 
-- `POST /api/register` – đăng ký (body JSON: `{ username, password, email }`)
-- `POST /api/login` – đăng nhập, trả về `token` (JWT)
-- `GET /api/me` – lấy info user (header: `Authorization: Bearer <token>`)
-- `POST /api/create-deposit` – tạo yêu cầu nạp (body `{ amount, note }`)
-- `GET /api/my-deposits` – xem lịch sử nạp của chính mình
-- `GET /api/admin/deposits` – admin xem tất cả yêu cầu nạp
-- `POST /api/admin/deposits/:id/approve` – admin duyệt + cộng tiền
-- `POST /api/admin/deposits/:id/reject` – admin từ chối
+- `POST /api/register` – đăng ký
+- `POST /api/login` – đăng nhập, trả `token`
+- `GET /api/me` – info user (cần `Authorization: Bearer <token>`)
+- `POST /api/create-deposit` – user tạo yêu cầu nạp
+- `GET /api/my-deposits` – user xem lịch sử nạp
+- `GET /api/admin/deposits` – admin xem toàn bộ
+- `POST /api/admin/deposits/:id/approve` – duyệt + cộng tiền
+- `POST /api/admin/deposits/:id/reject` – từ chối
 
 ## Chạy local
 
-1. Tạo file `.env` từ `.env.example`
-2. Cài thư viện:
+```bash
+npm install
+cp .env.example .env   # sửa JWT_SECRET nếu muốn
+npm start
+```
 
-   ```bash
-   npm install
-   ```
+Server chạy ở `http://localhost:3000`.
 
-3. Chạy:
+## Deploy Render
 
-   ```bash
-   npm start
-   ```
-
-Server sẽ chạy ở `http://localhost:3000`.
-
-## Deploy lên Render
-
-1. Đưa toàn bộ file lên GitHub
-2. Render → New → Web Service → chọn repo
+1. Up toàn bộ file lên GitHub
+2. Render → New → Web Service → repo này
 3. Build command: `npm install`
 4. Start command: `npm start`
-5. Environment Variables:
-   - `JWT_SECRET` – chuỗi bí mật bất kỳ (bắt buộc)
-   - `JWT_EXPIRES` – ví dụ `7d`
-   - `DB_FILE` – mặc định `database.sqlite` (có thể để trống)
+5. Env:
+   - `JWT_SECRET` (bắt buộc)
+   - `JWT_EXPIRES` (ví dụ `7d`)
+   - `DATA_FILE` (mặc định `data.json`)
 
-Sau khi deploy, backend hoạt động không cần database bên ngoài.
+Không cần database bên ngoài.

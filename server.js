@@ -3,78 +3,78 @@ const express = require('express');
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcrypt');
-const sqlite3 = require('sqlite3').verbose();
-const path = require('path');
 const fs = require('fs');
+const path = require('path');
 
 const app = express();
-
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// ====== SQLite setup ======
-const DB_FILE = process.env.DB_FILE || 'database.sqlite';
-const dbPath = path.join(__dirname, DB_FILE);
+// ====== Simple JSON file storage ======
+const DATA_FILE = process.env.DATA_FILE || 'data.json';
+const dataPath = path.join(__dirname, DATA_FILE);
 
-const db = new sqlite3.Database(dbPath);
+let db = {
+  users: [],
+  deposits: [],
+  keys: [],
+  seq: {
+    user: 1,
+    deposit: 1,
+    key: 1
+  }
+};
 
-// Tạo bảng nếu chưa có
-db.serialize(() => {
-  db.run(`CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT UNIQUE NOT NULL,
-    password_hash TEXT NOT NULL,
-    email TEXT,
-    balance INTEGER NOT NULL DEFAULT 0,
-    is_admin INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT DEFAULT (datetime('now'))
-  );`);
+function loadData() {
+  if (!fs.existsSync(dataPath)) {
+    console.log('No data.json, will create with default admin.');
+    saveData();
+    ensureAdmin();
+    return;
+  }
+  try {
+    const raw = fs.readFileSync(dataPath, 'utf8');
+    db = JSON.parse(raw);
+    ensureAdmin();
+  } catch (e) {
+    console.error('Error reading data.json, using empty DB:', e);
+    db = { users: [], deposits: [], keys: [], seq: { user: 1, deposit: 1, key: 1 } };
+    ensureAdmin();
+  }
+}
 
-  db.run(`CREATE TABLE IF NOT EXISTS deposits (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    amount INTEGER NOT NULL,
-    note TEXT,
-    status TEXT DEFAULT 'pending',
-    created_at TEXT DEFAULT (datetime('now')),
-    FOREIGN KEY (user_id) REFERENCES users(id)
-  );`);
+function saveData() {
+  try {
+    fs.writeFileSync(dataPath, JSON.stringify(db, null, 2), 'utf8');
+  } catch (e) {
+    console.error('Error saving data.json:', e);
+  }
+}
 
-  db.run(`CREATE TABLE IF NOT EXISTS keys (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    code TEXT NOT NULL,
-    pack_type TEXT NOT NULL,
-    created_at TEXT DEFAULT (datetime('now')),
-    FOREIGN KEY (user_id) REFERENCES users(id)
-  );`);
+// Create default admin if not exist
+async function ensureAdmin() {
+  const exists = db.users.find(u => u.username === 'admin');
+  if (!exists) {
+    const hash = await bcrypt.hash('admin123', 10);
+    const user = {
+      id: db.seq.user++,
+      username: 'admin',
+      password_hash: hash,
+      email: 'admin@example.com',
+      balance: 0,
+      is_admin: 1,
+      created_at: new Date().toISOString()
+    };
+    db.users.push(user);
+    saveData();
+    console.log('Created default admin: admin / admin123');
+  }
+}
 
-  // Tạo admin mặc định nếu chưa có
-  db.get('SELECT id FROM users WHERE username = ?', ['admin'], async (err, row) => {
-    if (err) {
-      console.error('Error checking admin:', err);
-      return;
-    }
-    if (!row) {
-      const defaultPass = 'admin123';
-      const hash = await bcrypt.hash(defaultPass, 10);
-      db.run(
-        'INSERT INTO users (username, password_hash, email, balance, is_admin) VALUES (?, ?, ?, ?, ?)',
-        ['admin', hash, 'admin@example.com', 0, 1],
-        (err2) => {
-          if (err2) {
-            console.error('Error creating default admin:', err2);
-          } else {
-            console.log('Default admin created: admin / admin123');
-          }
-        }
-      );
-    }
-  });
-});
+loadData();
 
-// ====== Helper ======
+// ====== Helpers ======
 function sendError(res, msg, status) {
   res.status(status || 400).json({ error: msg });
 }
@@ -88,7 +88,7 @@ function authRequired(req, res, next) {
   const token = parts[1];
   try {
     const payload = jwt.verify(token, process.env.JWT_SECRET || 'secret');
-    req.user = payload; // { id, username, is_admin }
+    req.user = payload;
     next();
   } catch (err) {
     return sendError(res, 'Token không hợp lệ hoặc đã hết hạn', 401);
@@ -103,13 +103,12 @@ function adminRequired(req, res, next) {
 }
 
 // ====== ROUTES ======
-
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', message: 'SHOP KEY API (Node + SQLite)' });
+  res.json({ status: 'ok', message: 'SHOP KEY API (Node + JSON file)' });
 });
 
 // Đăng ký
-app.post('/api/register', (req, res) => {
+app.post('/api/register', async (req, res) => {
   const { username, password, email } = req.body;
   if (!username || !password) {
     return sendError(res, 'Thiếu username hoặc password');
@@ -121,106 +120,76 @@ app.post('/api/register', (req, res) => {
     return sendError(res, 'Mật khẩu phải từ 6 ký tự');
   }
 
-  db.get('SELECT id FROM users WHERE username = ?', [username], async (err, row) => {
-    if (err) {
-      console.error(err);
-      return sendError(res, 'Lỗi database');
-    }
-    if (row) {
-      return sendError(res, 'Tên tài khoản đã tồn tại');
-    }
+  if (db.users.find(u => u.username === username)) {
+    return sendError(res, 'Tên tài khoản đã tồn tại');
+  }
 
-    try {
-      const hash = await bcrypt.hash(password, 10);
-      db.run(
-        'INSERT INTO users (username, password_hash, email) VALUES (?, ?, ?)',
-        [username, hash, email],
-        function (err2) {
-          if (err2) {
-            console.error(err2);
-            return sendError(res, 'Lỗi tạo user');
-          }
-          res.json({ success: true, message: 'Đăng ký thành công' });
-        }
-      );
-    } catch (e) {
-      console.error(e);
-      return sendError(res, 'Lỗi server', 500);
-    }
-  });
+  const hash = await bcrypt.hash(password, 10);
+  const user = {
+    id: db.seq.user++,
+    username,
+    password_hash: hash,
+    email,
+    balance: 0,
+    is_admin: 0,
+    created_at: new Date().toISOString()
+  };
+  db.users.push(user);
+  saveData();
+  res.json({ success: true, message: 'Đăng ký thành công' });
 });
 
 // Đăng nhập
-app.post('/api/login', (req, res) => {
+app.post('/api/login', async (req, res) => {
   const { username, password } = req.body;
   if (!username || !password) {
     return sendError(res, 'Thiếu username hoặc password');
   }
+  const user = db.users.find(u => u.username === username);
+  if (!user) {
+    return sendError(res, 'Sai tài khoản hoặc mật khẩu', 401);
+  }
+  const ok = await bcrypt.compare(password, user.password_hash);
+  if (!ok) {
+    return sendError(res, 'Sai tài khoản hoặc mật khẩu', 401);
+  }
 
-  db.get(
-    'SELECT id, username, password_hash, balance, is_admin FROM users WHERE username = ?',
-    [username],
-    async (err, row) => {
-      if (err) {
-        console.error(err);
-        return sendError(res, 'Lỗi database');
-      }
-      if (!row) {
-        return sendError(res, 'Sai tài khoản hoặc mật khẩu', 401);
-      }
-
-      const ok = await bcrypt.compare(password, row.password_hash);
-      if (!ok) {
-        return sendError(res, 'Sai tài khoản hoặc mật khẩu', 401);
-      }
-
-      const payload = {
-        id: row.id,
-        username: row.username,
-        is_admin: !!row.is_admin,
-      };
-      const token = jwt.sign(
-        payload,
-        process.env.JWT_SECRET || 'secret',
-        { expiresIn: process.env.JWT_EXPIRES || '7d' }
-      );
-
-      res.json({
-        success: true,
-        token,
-        user: {
-          id: row.id,
-          username: row.username,
-          balance: Number(row.balance) || 0,
-          is_admin: !!row.is_admin,
-        },
-      });
-    }
+  const payload = {
+    id: user.id,
+    username: user.username,
+    is_admin: !!user.is_admin
+  };
+  const token = jwt.sign(
+    payload,
+    process.env.JWT_SECRET || 'secret',
+    { expiresIn: process.env.JWT_EXPIRES || '7d' }
   );
+
+  res.json({
+    success: true,
+    token,
+    user: {
+      id: user.id,
+      username: user.username,
+      balance: user.balance || 0,
+      is_admin: !!user.is_admin
+    }
+  });
 });
 
-// Thông tin user hiện tại
+// Thông tin user
 app.get('/api/me', authRequired, (req, res) => {
-  db.get(
-    'SELECT id, username, email, balance, is_admin FROM users WHERE id = ?',
-    [req.user.id],
-    (err, row) => {
-      if (err) {
-        console.error(err);
-        return sendError(res, 'Lỗi database', 500);
-      }
-      if (!row) {
-        return sendError(res, 'Không tìm thấy user', 404);
-      }
-      res.json({
-        id: row.id,
-        username: row.username,
-        email: row.email,
-        balance: Number(row.balance) || 0,
-        is_admin: !!row.is_admin,
-      });
-    }
-  );
+  const user = db.users.find(u => u.id === req.user.id);
+  if (!user) {
+    return sendError(res, 'Không tìm thấy user', 404);
+  }
+  res.json({
+    id: user.id,
+    username: user.username,
+    email: user.email,
+    balance: user.balance || 0,
+    is_admin: !!user.is_admin
+  });
 });
 
 // Tạo yêu cầu nạp
@@ -230,98 +199,76 @@ app.post('/api/create-deposit', authRequired, (req, res) => {
   if (!amount || amount <= 0) {
     return sendError(res, 'Số tiền không hợp lệ');
   }
-
-  db.run(
-    'INSERT INTO deposits (user_id, amount, note) VALUES (?, ?, ?)',
-    [req.user.id, amount, note],
-    function (err) {
-      if (err) {
-        console.error(err);
-        return sendError(res, 'Lỗi database');
-      }
-      res.json({ success: true, message: 'Đã tạo yêu cầu nạp (pending)' });
-    }
-  );
+  const dep = {
+    id: db.seq.deposit++,
+    user_id: req.user.id,
+    amount,
+    note,
+    status: 'pending',
+    created_at: new Date().toISOString()
+  };
+  db.deposits.push(dep);
+  saveData();
+  res.json({ success: true, message: 'Đã tạo yêu cầu nạp (pending)' });
 });
 
 // Lịch sử nạp của user
 app.get('/api/my-deposits', authRequired, (req, res) => {
-  db.all(
-    'SELECT id, amount, note, status, created_at FROM deposits WHERE user_id = ? ORDER BY id DESC',
-    [req.user.id],
-    (err, rows) => {
-      if (err) {
-        console.error(err);
-        return sendError(res, 'Lỗi database');
-      }
-      res.json({ items: rows });
-    }
-  );
+  const items = db.deposits
+    .filter(d => d.user_id === req.user.id)
+    .sort((a, b) => b.id - a.id);
+  res.json({ items });
 });
 
 // Admin: list all deposits
 app.get('/api/admin/deposits', authRequired, adminRequired, (req, res) => {
-  db.all(
-    `SELECT d.id, d.amount, d.note, d.status, d.created_at, u.username
-     FROM deposits d
-     JOIN users u ON d.user_id = u.id
-     ORDER BY d.id DESC`,
-    [],
-    (err, rows) => {
-      if (err) {
-        console.error(err);
-        return sendError(res, 'Lỗi database', 500);
-      }
-      res.json({ items: rows });
-    }
-  );
+  const items = db.deposits
+    .slice()
+    .sort((a, b) => b.id - a.id)
+    .map(d => {
+      const u = db.users.find(x => x.id === d.user_id);
+      return {
+        id: d.id,
+        user_id: d.user_id,
+        username: u ? u.username : 'unknown',
+        amount: d.amount,
+        note: d.note,
+        status: d.status,
+        created_at: d.created_at
+      };
+    });
+  res.json({ items });
 });
 
-// Admin: approve (cộng tiền)
+// Admin: approve
 app.post('/api/admin/deposits/:id/approve', authRequired, adminRequired, (req, res) => {
   const id = parseInt(req.params.id, 10);
-  if (!id) return sendError(res, 'Thiếu id');
+  const dep = db.deposits.find(d => d.id === id);
+  if (!dep) return sendError(res, 'Không tìm thấy đơn nạp', 404);
+  if (dep.status !== 'pending') return sendError(res, 'Đơn đã được xử lý trước đó');
 
-  db.get('SELECT * FROM deposits WHERE id = ?', [id], (err, dep) => {
-    if (err) {
-      console.error(err);
-      return sendError(res, 'Lỗi database', 500);
-    }
-    if (!dep) return sendError(res, 'Không tìm thấy đơn nạp', 404);
-    if (dep.status !== 'pending') return sendError(res, 'Đơn đã được xử lý trước đó');
+  const user = db.users.find(u => u.id === dep.user_id);
+  if (!user) return sendError(res, 'Không tìm thấy user', 404);
 
-    db.serialize(() => {
-      db.run('UPDATE deposits SET status = "approved" WHERE id = ?', [id]);
-      db.run('UPDATE users SET balance = balance + ? WHERE id = ?', [dep.amount, dep.user_id]);
-    });
-
-    res.json({ success: true, message: 'Đã duyệt và cộng tiền' });
-  });
+  dep.status = 'approved';
+  user.balance = (user.balance || 0) + dep.amount;
+  saveData();
+  res.json({ success: true, message: 'Đã duyệt và cộng tiền' });
 });
 
 // Admin: reject
 app.post('/api/admin/deposits/:id/reject', authRequired, adminRequired, (req, res) => {
   const id = parseInt(req.params.id, 10);
-  if (!id) return sendError(res, 'Thiếu id');
+  const dep = db.deposits.find(d => d.id === id);
+  if (!dep) return sendError(res, 'Không tìm thấy đơn nạp', 404);
+  if (dep.status !== 'pending') return sendError(res, 'Đơn đã được xử lý trước đó');
 
-  db.run(
-    'UPDATE deposits SET status = "rejected" WHERE id = ? AND status = "pending"',
-    [id],
-    function (err) {
-      if (err) {
-        console.error(err);
-        return sendError(res, 'Lỗi database', 500);
-      }
-      if (this.changes === 0) {
-        return sendError(res, 'Không thể từ chối (có thể đã xử lý trước đó)');
-      }
-      res.json({ success: true, message: 'Đã từ chối đơn nạp' });
-    }
-  );
+  dep.status = 'rejected';
+  saveData();
+  res.json({ success: true, message: 'Đã từ chối đơn nạp' });
 });
 
-// ====== START SERVER ======
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log('SHOP KEY SQLite backend chạy trên port', PORT);
+  console.log('SHOP KEY file-backend đang chạy trên port', PORT);
 });
