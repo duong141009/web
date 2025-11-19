@@ -1,4 +1,3 @@
-\
 // SHOP KEY backend v3 - file JSON (users, deposits, keys)
 require('dotenv').config();
 const express = require('express');
@@ -20,7 +19,7 @@ const dataPath = path.join(__dirname, DATA_FILE);
 let db = {
   users: [],     // {id, username, password_hash, email, balance, is_admin, created_at, last_login_at, last_active_at}
   deposits: [],  // {id, user_id, amount, note, status, created_at}
-  keys: [],      // {id, user_id, code, pack_type, duration_days, created_at, expires_at}
+  keys: [],      // {id, user_id, code, pack_type, duration_minutes, created_at, expires_at, device_id}
   seq: { user: 1, deposit: 1, key: 1 }
 };
 
@@ -68,7 +67,11 @@ function loadData() {
     db.seq.deposit = db.seq.deposit || 1;
     db.seq.key = db.seq.key || 1;
 
-    // ensure fields
+    if (!Array.isArray(db.users)) db.users = [];
+    if (!Array.isArray(db.deposits)) db.deposits = [];
+    if (!Array.isArray(db.keys)) db.keys = [];
+
+    // ensure user fields
     db.users.forEach(u => {
       if (typeof u.balance !== 'number') u.balance = Number(u.balance || 0);
       if (typeof u.is_admin === 'undefined') u.is_admin = 0;
@@ -76,6 +79,16 @@ function loadData() {
       if (!('last_login_at' in u)) u.last_login_at = null;
       if (!('last_active_at' in u)) u.last_active_at = null;
     });
+
+    // ensure key fields
+    db.keys.forEach(k => {
+      if (!('duration_minutes' in k)) k.duration_minutes = 0;
+      if (!('pack_type' in k)) k.pack_type = '';
+      if (!('device_id' in k)) k.device_id = null;
+      if (!k.created_at) k.created_at = new Date().toISOString();
+      // expires_at có thể null
+    });
+
     ensureAdmin();
   } catch (e) {
     console.error('Error reading data.json, resetting DB:', e);
@@ -113,6 +126,23 @@ function adminRequired(req, res, next) {
   }
   next();
 }
+
+function generateRandomString(length) {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  let out = '';
+  for (let i = 0; i < length; i++) {
+    out += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return out;
+}
+
+// ===== CẤU HÌNH GÓI KEY =====
+const PACKS = {
+  '1d':   { price: 15000,  minutes: 1 * 24 * 60,  label: '1d'   }, // 15k / 1 ngày
+  '3d':   { price: 35000,  minutes: 3 * 24 * 60,  label: '3d'   }, // 35k / 3 ngày
+  '30d':  { price: 80000,  minutes: 30 * 24 * 60, label: '30d'  }, // 80k / 1 tháng
+  'life': { price: 150000, minutes: 0,            label: 'life' }  // 150k / vĩnh viễn
+};
 
 // ===== BASIC ROUTES =====
 app.get('/', (req, res) => {
@@ -176,6 +206,7 @@ app.post('/api/login', async (req, res) => {
     user: {
       id: user.id,
       username: user.username,
+      email: user.email,
       balance: user.balance || 0,
       is_admin: !!user.is_admin,
     },
@@ -228,6 +259,68 @@ app.get('/api/my-deposits', authRequired, (req, res) => {
   res.json({ items });
 });
 
+// ====== MUA KEY (USER) ======
+app.post('/api/buy-key', authRequired, (req, res) => {
+  const packCode = (req.body.pack || '').toString().toLowerCase();
+  const cfg = PACKS[packCode];
+  if (!cfg) return sendError(res, 'Gói key không hợp lệ');
+
+  const user = db.users.find(u => u.id === req.user.id);
+  if (!user) return sendError(res, 'Không tìm thấy user', 404);
+
+  const balance = user.balance || 0;
+  if (balance < cfg.price) {
+    return sendError(res, 'Số dư không đủ để mua gói này');
+  }
+
+  // trừ tiền
+  user.balance = balance - cfg.price;
+
+  // tạo key: tooltx-<label>-<random>
+  const randomPart = generateRandomString(16);
+  const code = `tooltx-${cfg.label}-${randomPart}`;
+  const now = new Date();
+  let expires_at = null;
+
+  if (cfg.minutes > 0) {
+    expires_at = new Date(now.getTime() + cfg.minutes * 60000).toISOString();
+  }
+
+  const key = {
+    id: db.seq.key++,
+    user_id: user.id,
+    code,
+    pack_type: cfg.label,
+    duration_minutes: cfg.minutes,
+    created_at: now.toISOString(),
+    expires_at,
+    device_id: null
+  };
+
+  db.keys.push(key);
+  saveData();
+
+  res.json({
+    success: true,
+    price: cfg.price,
+    balance: user.balance,
+    key
+  });
+});
+
+// Danh sách key của user hiện tại
+app.get('/api/my-keys', authRequired, (req, res) => {
+  const now = new Date();
+  const items = db.keys
+    .filter(k => k.user_id === req.user.id)
+    .sort((a, b) => b.id - a.id)
+    .map(k => ({
+      ...k,
+      is_expired: k.expires_at ? (new Date(k.expires_at) < now) : false
+    }));
+  res.json({ items });
+});
+
 // ===== ADMIN: DEPOSITS =====
 app.get('/api/admin/deposits', authRequired, adminRequired, (req, res) => {
   const items = db.deposits
@@ -260,7 +353,7 @@ app.post('/api/admin/deposits/:id/approve', authRequired, adminRequired, (req, r
   dep.status = 'approved';
   user.balance = (user.balance || 0) + dep.amount;
   saveData();
-  res.json({ success: true, message: 'Đã duyệt và cộng tiền' });
+  res.json({ success: true, message: 'Đã duyệt và cộng tiền', balance: user.balance });
 });
 
 app.post('/api/admin/deposits/:id/reject', authRequired, adminRequired, (req, res) => {
@@ -287,6 +380,7 @@ app.get('/api/admin/users', authRequired, adminRequired, (req, res) => {
 
   const keyCountByUser = {};
   db.keys.forEach(k => {
+    if (!k.user_id) return;
     keyCountByUser[k.user_id] = (keyCountByUser[k.user_id] || 0) + 1;
   });
 
@@ -346,6 +440,17 @@ app.post('/api/admin/keys/:id/delete', authRequired, adminRequired, (req, res) =
   res.json({ success: true, message: 'Đã xoá key' });
 });
 
+// Reset thiết bị cho key (mỗi key 1 thiết bị, reset = xoá device_id)
+app.post('/api/admin/keys/:id/reset-device', authRequired, adminRequired, (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  const key = db.keys.find(k => k.id === id);
+  if (!key) return sendError(res, 'Không tìm thấy key', 404);
+
+  key.device_id = null;
+  saveData();
+  res.json({ success: true, message: 'Đã reset thiết bị cho key' });
+});
+
 // Xoá 1 tài khoản (và toàn bộ nạp, key liên quan)
 app.post('/api/admin/users/:id/delete', authRequired, adminRequired, (req, res) => {
   const id = parseInt(req.params.id, 10);
@@ -362,6 +467,71 @@ app.post('/api/admin/users/:id/delete', authRequired, adminRequired, (req, res) 
 
   saveData();
   res.json({ success: true, message: 'Đã xoá tài khoản và toàn bộ dữ liệu liên quan' });
+});
+
+// Admin + / - tiền
+app.post('/api/admin/users/:id/adjust-balance', authRequired, adminRequired, (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  const delta = Number(req.body.delta || 0);
+  const reason = (req.body.reason || '').toString();
+
+  if (!delta || isNaN(delta)) return sendError(res, 'delta không hợp lệ');
+
+  const user = db.users.find(u => u.id === id);
+  if (!user) return sendError(res, 'Không tìm thấy user', 404);
+
+  user.balance = (user.balance || 0) + delta;
+  saveData();
+  res.json({
+    success: true,
+    message: 'Đã chỉnh số dư (' + (reason || 'no reason') + ')',
+    balance: user.balance
+  });
+});
+
+// Admin tạo key thủ công
+// body: { time_label, minutes, random_len, user_id }
+app.post('/api/admin/keys/manual-create', authRequired, adminRequired, (req, res) => {
+  let { time_label, minutes, random_len, user_id } = req.body;
+  time_label = (time_label || 'custom').toString();
+  minutes = parseInt(minutes, 10) || 0;
+  random_len = parseInt(random_len, 10) || 12;
+
+  let user = null;
+  let uid = null;
+  if (user_id !== null && user_id !== undefined && user_id !== '') {
+    uid = parseInt(user_id, 10);
+    user = db.users.find(u => u.id === uid);
+    if (!user) return sendError(res, 'Không tìm thấy user để gán key', 404);
+  }
+
+  const randomPart = generateRandomString(random_len);
+  const code = `tooltx-${time_label}-${randomPart}`;
+
+  const now = new Date();
+  let expires_at = null;
+  if (minutes > 0) {
+    expires_at = new Date(now.getTime() + minutes * 60000).toISOString();
+  }
+
+  const key = {
+    id: db.seq.key++,
+    user_id: uid,           // có thể null
+    code,
+    pack_type: time_label,
+    duration_minutes: minutes,
+    created_at: now.toISOString(),
+    expires_at,
+    device_id: null
+  };
+
+  db.keys.push(key);
+  saveData();
+
+  res.json({
+    success: true,
+    key
+  });
 });
 
 // ===== START SERVER =====
