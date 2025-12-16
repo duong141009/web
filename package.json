@@ -1,13 +1,29 @@
 {
-  "name": "k89-backend-firebase-gd1",
+  "name": "firebase-backend-vip",
   "version": "1.0.0",
-  "main": "server.js",
+  "description": "Backend API for user authentication and VIP system using Express, Firebase Firestore, bcrypt, and JWT.",
+  "main": "Server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node Server.js",
+    "dev": "nodemon Server.js"
   },
+  "keywords": [
+    "express",
+    "firebase",
+    "firestore",
+    "auth",
+    "vip"
+  ],
+  "author": "",
+  "license": "ISC",
   "dependencies": {
-    "express": "^4.18.2",
+    "bcrypt": "^5.1.1",
     "cors": "^2.8.5",
-    "firebase-admin": "^12.0.0"
+    "express": "^4.18.2",
+    "firebase-admin": "^12.0.0",
+    "jsonwebtoken": "^9.0.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.3"
   }
 }
