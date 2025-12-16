@@ -11,9 +11,7 @@ const PORT = process.env.PORT || 3000;
 const USERS_FILE = path.join(__dirname, 'users.json');
 
 // Middleware
-// Cho phép các domain khác (frontend) truy cập
 app.use(cors()); 
-// Cho phép server đọc dữ liệu JSON từ request body
 app.use(express.json()); 
 
 /**
@@ -39,14 +37,14 @@ function writeUsers(users) {
 }
 
 // ===========================================
-// ENDPOINT ĐĂNG KÝ
+// ENDPOINT ĐĂNG KÝ (Bổ sung lastLogin và createdAt)
 // ===========================================
 app.post('/api/register', (req, res) => {
     const { username, password, fullname, email, phone } = req.body;
 
-    // 1. Validation cơ bản (Sử dụng lại logic từ frontend là tốt nhất)
-    if (!username || !password || !fullname) {
-        return res.status(400).json({ success: false, message: 'Vui lòng điền đầy đủ thông tin bắt buộc.' });
+    // 1. Validation cơ bản (Yêu cầu có SĐT và Họ tên)
+    if (!username || !password || !fullname || !phone) {
+        return res.status(400).json({ success: false, message: 'Vui lòng điền đầy đủ thông tin bắt buộc: Username, Password, Họ tên, và SĐT.' });
     }
 
     let users = readUsers();
@@ -56,30 +54,33 @@ app.post('/api/register', (req, res) => {
         return res.status(409).json({ success: false, message: 'Tên đăng nhập đã tồn tại.' });
     }
 
-    // 3. Tạo người dùng mới
+    const now = new Date().toISOString();
+    
+    // 3. Tạo người dùng mới với các trường dữ liệu chi tiết
     const newUser = {
         username,
-        password, // LƯU Ý: Trong thực tế, KHÔNG BAO GIỜ lưu mật khẩu dưới dạng plaintext! Phải dùng bcrypt.
+        password, 
         fullname,
         email: email || '',
         phone,
         balance: 0, 
-        createdAt: new Date().toISOString()
+        createdAt: now,   // Thời gian đăng ký lần đầu
+        lastLogin: now    // Lần đăng nhập cuối (ngay sau khi đăng ký)
     };
 
     users.push(newUser);
-    writeUsers(users); // Ghi lại vào file
+    writeUsers(users); 
 
     console.log(`Người dùng mới đã đăng ký: ${username}`);
     res.status(201).json({ 
         success: true, 
         message: 'Đăng ký thành công.',
-        user: { username, fullname } // Trả về thông tin an toàn
+        user: { username, fullname } 
     });
 });
 
 // ===========================================
-// ENDPOINT ĐĂNG NHẬP
+// ENDPOINT ĐĂNG NHẬP (CẬP NHẬT lastLogin)
 // ===========================================
 app.post('/api/login', (req, res) => {
     const { username, password } = req.body;
@@ -88,31 +89,71 @@ app.post('/api/login', (req, res) => {
         return res.status(400).json({ success: false, message: 'Vui lòng nhập Tên đăng nhập và Mật khẩu.' });
     }
 
-    const users = readUsers();
+    let users = readUsers();
     
-    // 1. Tìm người dùng
-    const user = users.find(u => u.username === username);
+    const userIndex = users.findIndex(u => u.username === username);
 
-    if (!user) {
+    if (userIndex === -1) {
         return res.status(401).json({ success: false, message: 'Tên đăng nhập không tồn tại.' });
     }
 
-    // 2. Kiểm tra mật khẩu (Giả lập kiểm tra mật khẩu plaintext)
+    const user = users[userIndex];
+
     if (user.password !== password) {
         return res.status(401).json({ success: false, message: 'Mật khẩu không đúng.' });
     }
 
-    // 3. Đăng nhập thành công
-    console.log(`Người dùng đã đăng nhập: ${username}`);
+    // 3. Đăng nhập thành công và CẬP NHẬT LAST LOGIN
+    const now = new Date().toISOString();
+    
+    users[userIndex].lastLogin = now; 
+    writeUsers(users); // Ghi lại vào file
+
+    console.log(`Người dùng đã đăng nhập và cập nhật lastLogin: ${username} lúc ${now}`);
     res.status(200).json({
         success: true,
         message: 'Đăng nhập thành công.',
-        token: 'mock-jwt-token-12345', // Trong thực tế, trả về JWT
+        token: 'mock-jwt-token-12345', 
         user: { 
             username: user.username, 
             fullname: user.fullname,
-            balance: user.balance // Trả về số dư
+            balance: user.balance 
         }
+    });
+});
+
+
+// ===========================================
+// ENDPOINT LẤY CHI TIẾT NGƯỜI DÙNG (Cho trang Cài đặt)
+// ===========================================
+app.get('/api/user-details/:username', (req, res) => {
+    const { username } = req.params; 
+
+    if (!username) {
+        return res.status(400).json({ success: false, message: 'Thiếu tên đăng nhập.' });
+    }
+
+    const users = readUsers();
+    
+    const user = users.find(u => u.username === username);
+
+    if (!user) {
+        return res.status(404).json({ success: false, message: 'Người dùng không tồn tại.' });
+    }
+
+    // Trả về đầy đủ các thông tin bạn yêu cầu
+    const userDetails = {
+        username: user.username,
+        fullname: user.fullname,
+        phone: user.phone,
+        email: user.email,
+        createdAt: user.createdAt,
+        lastLogin: user.lastLogin // <--- Dữ liệu Đăng nhập cuối
+    };
+
+    res.status(200).json({
+        success: true,
+        data: userDetails
     });
 });
 
