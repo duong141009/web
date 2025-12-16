@@ -1,38 +1,32 @@
 const express = require("express");
 const cors = require("cors");
-const fs = require("fs");
-const path = require("path");
+const admin = require("firebase-admin");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// =========================
-// MIDDLEWARE
-// =========================
 app.use(cors());
 app.use(express.json());
 
-// =========================
-// FILE DATA
-// =========================
-const DATA_DIR = path.join(__dirname, "data");
-const USERS_FILE = path.join(DATA_DIR, "users.json");
-
-function ensureDataFile() {
-  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR);
-  if (!fs.existsSync(USERS_FILE)) fs.writeFileSync(USERS_FILE, "[]");
-}
-function readUsers() {
-  ensureDataFile();
-  return JSON.parse(fs.readFileSync(USERS_FILE, "utf-8"));
-}
-function saveUsers(users) {
-  fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2));
+// =====================================
+// FIREBASE INIT
+// =====================================
+if (!process.env.FIREBASE_SERVICE_ACCOUNT) {
+  throw new Error("Missing FIREBASE_SERVICE_ACCOUNT env");
 }
 
-// =========================
+const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+});
+
+const db = admin.firestore();
+const usersCol = db.collection("users");
+
+// =====================================
 // VALIDATION
-// =========================
+// =====================================
 function normalizePhone(phone) {
   let p = String(phone || "").replace(/\D/g, "");
   if (p.startsWith("0")) p = p.slice(1);
@@ -45,144 +39,163 @@ function isValidEmail(email) {
   return !email || email.includes("@");
 }
 
-// =========================
+// =====================================
 // HEALTH CHECK
-// =========================
-app.get("/", (req, res) => res.send("API OK"));
+// =====================================
+app.get("/", (req, res) => res.send("API OK - Firebase"));
 
-// ======================================================
-// AUTH – REGISTER
+// =====================================
+// REGISTER
 // POST /api/register
 // POST /api/auth/register
-// ======================================================
-app.post(["/api/register", "/api/auth/register"], (req, res) => {
-  const { username, password, fullname, email = "", phone } = req.body;
+// =====================================
+app.post(["/api/register", "/api/auth/register"], async (req, res) => {
+  try {
+    const { username, password, fullname, email = "", phone } = req.body;
 
-  if (!username || !password || !fullname || !phone)
-    return res.status(400).json({ success: false, message: "Thiếu dữ liệu" });
+    if (!username || !password || !fullname || !phone)
+      return res.status(400).json({ success: false, message: "Thiếu dữ liệu" });
 
-  const u = username.trim();
-  const p = password;
-  const fn = fullname.trim();
-  const em = email.trim();
-  const ph = normalizePhone(phone);
+    const u = username.trim();
+    const p = password;
+    const fn = fullname.trim();
+    const em = email.trim();
+    const ph = normalizePhone(phone);
 
-  if (u.length < 6 || u.length > 15 || !/^[a-zA-Z0-9]+$/.test(u))
-    return res.status(400).json({ success: false, message: "Username không hợp lệ" });
+    if (u.length < 6 || u.length > 15 || !/^[a-zA-Z0-9]+$/.test(u))
+      return res.status(400).json({ success: false, message: "Username không hợp lệ" });
 
-  if (p.length < 8 || p.length > 20)
-    return res.status(400).json({ success: false, message: "Mật khẩu không hợp lệ" });
+    if (p.length < 8 || p.length > 20)
+      return res.status(400).json({ success: false, message: "Mật khẩu không hợp lệ" });
 
-  if (!fn)
-    return res.status(400).json({ success: false, message: "Họ tên không hợp lệ" });
+    if (!fn)
+      return res.status(400).json({ success: false, message: "Họ tên không hợp lệ" });
 
-  if (!isValidEmail(em))
-    return res.status(400).json({ success: false, message: "Email phải có @" });
+    if (!isValidEmail(em))
+      return res.status(400).json({ success: false, message: "Email phải có @" });
 
-  if (!isValidPhone(ph))
-    return res.status(400).json({ success: false, message: "SĐT phải 9 số, bỏ số 0 đầu" });
+    if (!isValidPhone(ph))
+      return res.status(400).json({ success: false, message: "SĐT phải 9 số, bỏ số 0 đầu" });
 
-  const users = readUsers();
-  if (users.find(x => x.username === u))
-    return res.status(409).json({ success: false, message: "Username đã tồn tại" });
+    const userRef = usersCol.doc(u);
+    const snap = await userRef.get();
 
-  const now = new Date().toISOString();
-  users.push({
-    username: u,
-    password: p,          // GĐ1: plain text
-    fullname: fn,
-    email: em,
-    phone: ph,
-    rank: "Thứ hạng 100 khác",
-    createdAt: now,
-    lastLogin: null
-  });
+    if (snap.exists)
+      return res.status(409).json({ success: false, message: "Username đã tồn tại" });
 
-  saveUsers(users);
-  res.status(201).json({ success: true });
+    const now = new Date().toISOString();
+
+    await userRef.set({
+      username: u,
+      password: p, // GĐ1: chưa hash
+      fullname: fn,
+      email: em,
+      phone: ph,
+      rank: "Thứ hạng 100 khác",
+      createdAt: now,
+      lastLogin: null,
+    });
+
+    res.status(201).json({ success: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
 });
 
-// ======================================================
-// AUTH – LOGIN
+// =====================================
+// LOGIN
 // POST /api/login
 // POST /api/auth/login
-// ======================================================
-app.post(["/api/login", "/api/auth/login"], (req, res) => {
-  const { username, password } = req.body;
-  if (!username || !password)
-    return res.status(400).json({ success: false, message: "Thiếu dữ liệu" });
+// =====================================
+app.post(["/api/login", "/api/auth/login"], async (req, res) => {
+  try {
+    const { username, password } = req.body;
+    if (!username || !password)
+      return res.status(400).json({ success: false, message: "Thiếu dữ liệu" });
 
-  const users = readUsers();
-  const user = users.find(u => u.username === username && u.password === password);
+    const ref = usersCol.doc(username);
+    const snap = await ref.get();
 
-  if (!user)
-    return res.status(401).json({ success: false, message: "Sai tài khoản hoặc mật khẩu" });
+    if (!snap.exists || snap.data().password !== password)
+      return res.status(401).json({ success: false, message: "Sai tài khoản hoặc mật khẩu" });
 
-  user.lastLogin = new Date().toISOString();
-  saveUsers(users);
+    await ref.update({ lastLogin: new Date().toISOString() });
 
-  res.json({ success: true, user: { username: user.username } });
+    res.json({ success: true, user: { username } });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
 });
 
-// ======================================================
+// =====================================
 // USER DETAILS
 // GET /api/users/:username
-// GET /api/user-details/:username   (legacy frontend)
-// ======================================================
-app.get(["/api/users/:username", "/api/user-details/:username"], (req, res) => {
-  const username = req.params.username;
-  const users = readUsers();
-  const user = users.find(u => u.username === username);
+// GET /api/user-details/:username
+// =====================================
+app.get(["/api/users/:username", "/api/user-details/:username"], async (req, res) => {
+  try {
+    const ref = usersCol.doc(req.params.username);
+    const snap = await ref.get();
 
-  if (!user)
-    return res.status(404).json({ success: false, message: "Không tìm thấy user" });
+    if (!snap.exists)
+      return res.status(404).json({ success: false, message: "Không tìm thấy user" });
 
-  res.json({
-    success: true,
-    data: {
-      username: user.username,
-      fullname: user.fullname,
-      email: user.email,
-      phone: user.phone,
-      rank: user.rank,
-      createdAt: user.createdAt,
-      lastLogin: user.lastLogin
-    }
-  });
+    const u = snap.data();
+
+    res.json({
+      success: true,
+      data: {
+        username: u.username,
+        fullname: u.fullname,
+        email: u.email,
+        phone: u.phone,
+        rank: u.rank,
+        createdAt: u.createdAt,
+        lastLogin: u.lastLogin,
+      },
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
 });
 
-// ======================================================
+// =====================================
 // CHANGE PASSWORD
 // PUT /api/settings/:username/password
-// ======================================================
-app.put("/api/settings/:username/password", (req, res) => {
-  const { username } = req.params;
-  const { oldPassword, newPassword } = req.body;
+// =====================================
+app.put("/api/settings/:username/password", async (req, res) => {
+  try {
+    const { oldPassword, newPassword } = req.body;
+    const { username } = req.params;
 
-  if (!oldPassword || !newPassword)
-    return res.status(400).json({ success: false, message: "Thiếu dữ liệu" });
+    if (!oldPassword || !newPassword)
+      return res.status(400).json({ success: false, message: "Thiếu dữ liệu" });
 
-  const users = readUsers();
-  const user = users.find(u => u.username === username);
+    if (newPassword.length < 8 || newPassword.length > 20)
+      return res.status(400).json({ success: false, message: "Mật khẩu mới không hợp lệ" });
 
-  if (!user)
-    return res.status(404).json({ success: false, message: "Không tìm thấy user" });
+    const ref = usersCol.doc(username);
+    const snap = await ref.get();
 
-  if (user.password !== oldPassword)
-    return res.status(401).json({ success: false, message: "Mật khẩu cũ sai" });
+    if (!snap.exists)
+      return res.status(404).json({ success: false, message: "Không tìm thấy user" });
 
-  if (newPassword.length < 8 || newPassword.length > 20)
-    return res.status(400).json({ success: false, message: "Mật khẩu mới không hợp lệ" });
+    if (snap.data().password !== oldPassword)
+      return res.status(401).json({ success: false, message: "Mật khẩu cũ sai" });
 
-  user.password = newPassword;
-  saveUsers(users);
+    await ref.update({ password: newPassword });
 
-  res.json({ success: true });
+    res.json({ success: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
 });
 
-// =========================
-// START SERVER
-// =========================
+// =====================================
 app.listen(PORT, () => {
-  console.log("Server running on port", PORT);
+  console.log("Firebase backend running on", PORT);
 });
